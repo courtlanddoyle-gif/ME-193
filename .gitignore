@@ -1,0 +1,8 @@
+# Board credentials / IP addresses created by deploy.py — never commit
+board_secrets.py
+
+# Python / OS cruft
+.cache/
+__pycache__/
+*.pyc
+.DS_Store
