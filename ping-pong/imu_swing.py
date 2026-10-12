@@ -20,6 +20,7 @@ proves the code works; it does not prove it will work on a real swing.
 """
 
 import math
+import threading
 from collections import deque
 
 import joblib
@@ -185,21 +186,27 @@ class SwingDetector:
 
 
 class ImuBuffer:
-    """Thread-safe-enough rolling buffer of (timestamp, 6 IMU values)."""
+    """Rolling buffer of (timestamp, 6 IMU values). The Bluetooth thread
+    writes while the game thread reads, so every access takes a lock --
+    without it, reading mid-write can raise "deque mutated during iteration"."""
 
     def __init__(self, seconds=2.0):
         self._buf = deque()
         self._seconds = seconds
+        self._lock = threading.Lock()
 
     def add(self, t, sample):
-        self._buf.append((t, np.asarray(sample, dtype=np.float64)))
-        while self._buf and self._buf[0][0] < t - self._seconds:
-            self._buf.popleft()
+        with self._lock:
+            self._buf.append((t, np.asarray(sample, dtype=np.float64)))
+            while self._buf and self._buf[0][0] < t - self._seconds:
+                self._buf.popleft()
 
     def since(self, t):
         """All (timestamp, sample) pairs newer than t."""
-        return [(ts, s) for (ts, s) in list(self._buf) if ts > t]
+        with self._lock:
+            return [(ts, s) for (ts, s) in self._buf if ts > t]
 
     def window(self, now, window_s=config.SWING_WINDOW_S):
-        rows = [s for (t, s) in list(self._buf) if t >= now - window_s]
+        with self._lock:
+            rows = [s for (t, s) in self._buf if t >= now - window_s]
         return np.array(rows) if rows else np.empty((0, 6))

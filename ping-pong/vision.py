@@ -198,3 +198,106 @@ def camera_x_to_table(x_cam):
     lo, hi = config.CAMERA_X_RANGE
     mirrored = 1.0 - x_cam
     return float(np.clip((mirrored - (1 - hi)) / (hi - lo), 0.0, 1.0))
+
+
+class VisionWorker:
+    """Runs the camera and all three vision models on a background thread.
+
+    The game loop never waits on the camera, pose or YOLO: it just asks for
+    the most recent results with latest(). If a model is slow or the webcam
+    hiccups, the camera view lags a moment but the game, the ball and the
+    window keep running. Any step that takes over SLOW_MS gets printed so
+    remaining slowdowns can be traced.
+    """
+
+    SLOW_MS = 250
+
+    def __init__(self, camera_index, use_yolo=True):
+        import threading
+
+        self.cap = cv2.VideoCapture(camera_index)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.FRAME_WIDTH)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.FRAME_HEIGHT)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # always the newest frame, not a backlog
+        if not self.cap.isOpened():
+            raise SystemExit(f"Could not open camera {camera_index}. Try --camera 1, or --no-camera.")
+
+        self.pose = PoseTracker()
+        self.tags = TagReader()
+        self.hub = HubDetector() if use_yolo else None
+        if self.hub is not None:
+            # YOLO's first prediction takes several seconds -- do it now,
+            # not in the middle of a rally
+            print("Warming up YOLO...")
+            self.hub.detect(np.zeros((config.FRAME_HEIGHT, config.FRAME_WIDTH, 3), np.uint8))
+
+        self.want_tags = True     # the game turns this off during rallies
+        self._lock = threading.Lock()
+        self._snapshot = dict(seq=0, frame=None, wrist=None, boxes=[], landmarks=None, tags=[])
+        self._tag_events = []
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        import time
+
+        t0 = time.monotonic()
+        frame_i = 0
+        boxes = []
+        bad_reads = 0
+        while self._running:
+            start = time.monotonic()
+            ok, frame = self.cap.read()
+            if not ok:
+                bad_reads += 1
+                if bad_reads % 30 == 1:
+                    print(f"Camera returned no frame ({bad_reads} in a row)")
+                time.sleep(0.01)
+                continue
+            bad_reads = 0
+            frame = cv2.resize(frame, (config.FRAME_WIDTH, config.FRAME_HEIGHT))
+            t_read = time.monotonic()
+
+            wrist = self.pose.process(frame, int((t_read - t0) * 1000))
+            t_pose = time.monotonic()
+
+            if self.hub is not None and frame_i % config.YOLO_EVERY_N_FRAMES == 0:
+                boxes = self.hub.detect(frame)
+            t_yolo = time.monotonic()
+
+            tag = self.tags.process(frame) if self.want_tags else None
+            if not self.want_tags:
+                self.tags.visible = []
+            t_tags = time.monotonic()
+
+            with self._lock:
+                self._snapshot = dict(
+                    seq=self._snapshot["seq"] + 1, frame=frame, wrist=wrist, boxes=boxes,
+                    landmarks=self.pose.landmarks, tags=list(self.tags.visible))
+                if tag is not None:
+                    self._tag_events.append(tag)
+            frame_i += 1
+
+            total_ms = (t_tags - start) * 1000
+            if total_ms > self.SLOW_MS:
+                print(f"[slow camera frame] {total_ms:.0f} ms = read {(t_read - start) * 1000:.0f}"
+                      f" + pose {(t_pose - t_read) * 1000:.0f} + yolo {(t_yolo - t_pose) * 1000:.0f}"
+                      f" + tags {(t_tags - t_yolo) * 1000:.0f}")
+
+    def latest(self):
+        with self._lock:
+            return dict(self._snapshot)
+
+    def pop_tag(self):
+        """The most recent tag that was held up long enough, or None."""
+        with self._lock:
+            tag = self._tag_events[-1] if self._tag_events else None
+            self._tag_events.clear()
+        return tag
+
+    def close(self):
+        self._running = False
+        self._thread.join(timeout=1.0)
+        self.cap.release()
+        self.pose.close()

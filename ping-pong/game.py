@@ -21,7 +21,7 @@ import cv2
 import numpy as np
 
 import config
-from game_logic import MISS, OPPONENT_WIDTH, READY, RALLY, SETUP, Game
+from game_logic import OPPONENT_WIDTH, READY, RALLY, SETUP, Game
 from imu_swing import SwingDetector
 from paddle_hw import make_paddle
 from score import ScorePublisher, load_best, save_best
@@ -34,6 +34,7 @@ WINDOW = "Ping Pong (q to quit)"
 # table drawing area inside the table panel
 TX0, TY0, TX1, TY1 = 50, 30, TABLE_W - 50, CAM_H - 30
 
+SLOW_LOOP_S = 0.15     # print a breakdown of any game-loop tick slower than this
 KEY_TAGS = {ord("0"): 0, ord("1"): 1, ord("2"): 2, ord("3"): 3}
 
 
@@ -108,7 +109,7 @@ def draw_table(game, paddle_x, swinging):
     return img
 
 
-def draw_camera(frame, pose, locator, tags, wrist, sources_note):
+def draw_camera(frame, landmarks, locator, visible_tags, wrist, sources_note):
     """Mirror the frame and draw what each model sees on top of it."""
     view = cv2.flip(frame, 1)
     def px(x, y):
@@ -118,8 +119,8 @@ def draw_camera(frame, pose, locator, tags, wrist, sources_note):
     for edge in (lo, hi):
         cv2.line(view, (int(edge * CAM_W), 0), (int(edge * CAM_W), CAM_H), (90, 90, 90), 1)
 
-    if pose is not None and pose.landmarks is not None:
-        lm = pose.landmarks
+    if landmarks is not None:
+        lm = landmarks
         for a, b in [(11, 12), (11, 13), (13, 15), (12, 14), (14, 16)]:
             cv2.line(view, px(lm[a].x, lm[a].y), px(lm[b].x, lm[b].y), (255, 200, 0), 2)
     if wrist is not None:
@@ -129,8 +130,8 @@ def draw_camera(frame, pose, locator, tags, wrist, sources_note):
         cv2.rectangle(view, px(x2, y1), px(x1, y2), (0, 255, 0), 2)
         cv2.putText(view, f"paddle ({name} {conf:.2f})", px(x2, y1 - 0.01),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-    if tags is not None:
-        for tag_id, corners in tags.visible:
+    if visible_tags:
+        for tag_id, corners in visible_tags:
             pts = np.array([px(c[0] / CAM_W, c[1] / CAM_H) for c in corners[0]], np.int32)
             cv2.polylines(view, [pts], True, (255, 0, 255), 3)
             label = {config.START_TAG_ID: "START"}.get(tag_id, config.LEVEL_TAG_IDS.get(tag_id, "?"))
@@ -187,18 +188,10 @@ def main():
     detector = SwingDetector()
     paddle = make_paddle(args.sim)
 
-    cap = pose = hub = tags = None
+    vision = None
     if not args.no_camera:
-        from vision import HubDetector, PoseTracker, TagReader
-        cap = cv2.VideoCapture(args.camera)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_W)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
-        if not cap.isOpened():
-            raise SystemExit(f"Could not open camera {args.camera}. Try --camera 1, or --no-camera.")
-        pose = PoseTracker()
-        tags = TagReader()
-        if not args.no_yolo:
-            hub = HubDetector()
+        from vision import VisionWorker
+        vision = VisionWorker(args.camera, use_yolo=not args.no_yolo)
 
     mic = None
     if not args.no_mic:
@@ -218,11 +211,10 @@ def main():
     cv2.namedWindow(WINDOW)
     cv2.setMouseCallback(WINDOW, on_mouse)
 
-    frame_i = 0
-    boxes = []
-    wrist = None
+    seen_seq = 0
+    snap = None
+    paddle_x = 0.5
     last = time.monotonic()
-    t_start = last
     try:
         while True:
             now = time.monotonic()
@@ -231,21 +223,18 @@ def main():
             tag = None
 
             # ---- perception ----------------------------------------------
-            if cap is not None:
-                ok, frame = cap.read()
-                if not ok:
-                    continue
-                frame = cv2.resize(frame, (CAM_W, CAM_H))
-                wrist = pose.process(frame, int((now - t_start) * 1000))
-                if hub is not None and frame_i % config.YOLO_EVERY_N_FRAMES == 0:
-                    boxes = hub.detect(frame)
-                if game.state in (SETUP, READY):
-                    tag = tags.process(frame)
-                paddle_x = locator.update(wrist, boxes)
+            # The camera + models run on their own thread (VisionWorker);
+            # here we only pick up whatever they finished most recently.
+            if vision is not None:
+                vision.want_tags = game.state in (SETUP, READY)
+                snap = vision.latest()
+                if snap["seq"] != seen_seq:          # a new camera frame is ready
+                    seen_seq = snap["seq"]
+                    paddle_x = locator.update(snap["wrist"], snap["boxes"])
+                tag = vision.pop_tag()
             else:
-                frame = None
                 paddle_x = locator.set_direct(mouse["x"])
-            frame_i += 1
+            t_vision = time.monotonic()
 
             detector.update(now, paddle.imu_window(now))
             swinging = detector.swinging(now)
@@ -267,6 +256,7 @@ def main():
                 publisher.publish(0)
 
             # ---- policy --------------------------------------------------
+            t_input = time.monotonic()
             events = game.update(now, dt, paddle_x, swinging, tag, whistle)
 
             # ---- actions -------------------------------------------------
@@ -287,10 +277,12 @@ def main():
                     print(f"[{game.state}] {e}: {game.message}")
 
             # ---- draw ----------------------------------------------------
+            t_actions = time.monotonic()
             table = draw_table(game, paddle_x, swinging)
-            if frame is not None:
+            if snap is not None and snap["frame"] is not None:
                 note = f"{'SIM paddle' if paddle.is_sim else 'LEGO paddle'} | paddle from {locator.source}"
-                left = draw_camera(frame, pose, locator, tags, wrist, note)
+                left = draw_camera(snap["frame"], snap["landmarks"], locator, snap["tags"],
+                                   snap["wrist"], note)
             else:
                 left = no_camera_panel()
             screen = np.vstack([np.hstack([left, table]),
@@ -300,12 +292,18 @@ def main():
             if dx or dy:
                 screen = np.roll(screen, (dy, dx), axis=(0, 1))
             cv2.imshow(WINDOW, screen)
+
+            # ---- freeze detective ----------------------------------------
+            end = time.monotonic()
+            if end - now > SLOW_LOOP_S:
+                print(f"[slow game loop] {(end - now) * 1000:.0f} ms = vision {(t_vision - now) * 1000:.0f}"
+                      f" + swing/mic/keys {(t_input - t_vision) * 1000:.0f}"
+                      f" + game/haptics/mqtt {(t_actions - t_input) * 1000:.0f}"
+                      f" + draw {(end - t_actions) * 1000:.0f}")
     finally:
         paddle.close()
-        if cap is not None:
-            cap.release()
-        if pose is not None:
-            pose.close()
+        if vision is not None:
+            vision.close()
         if mic is not None:
             mic.close()
         publisher.close()

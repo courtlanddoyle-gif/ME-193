@@ -25,8 +25,13 @@ def load_best():
 
 
 def save_best(best):
-    config.DATA_DIR.mkdir(exist_ok=True)
-    config.BEST_SCORE_FILE.write_text(json.dumps({"best": best}))
+    """Never let saving the record interrupt the game -- Box sync can
+    briefly lock files on Windows."""
+    try:
+        config.DATA_DIR.mkdir(exist_ok=True)
+        config.BEST_SCORE_FILE.write_text(json.dumps({"best": best}))
+    except OSError as exc:
+        print(f"Couldn't save record ({exc}); it will be saved next time.")
 
 
 def format_score(best):
