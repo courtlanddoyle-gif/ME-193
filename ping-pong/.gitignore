@@ -1,2 +1,12 @@
 # Local virtual environment
 .venv/
+__pycache__/
+.pytest_cache/
+
+# Downloaded pretrained models (fetched automatically on first run)
+models/pose_landmarker_lite.task
+*.pt
+!models/hub_yolo.pt
+
+# Your personal record
+data/best_score.json
