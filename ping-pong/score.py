@@ -1,11 +1,16 @@
 """
-Live score over MQTT.
+Live score over MQTT, on two topics:
 
-Publishes the record (longest streak of continuous hits) as a floating
-point number, e.g. "7.0", to ME193/Rogers/Courtland every time it goes up.
-Messages are retained, so anyone who subscribes later immediately gets the
-current record instead of waiting for the next one. The record is also
-saved to data/best_score.json so it survives restarting the game.
+    ME193/Rogers/Courtland        the record (longest streak of continuous
+                                  hits) as a float, e.g. "7.0", every time
+                                  it goes up -- the assignment's format
+    ME193/Rogers/Courtland/game   the current game to 5, your points first:
+                                  "0-0", "2-1", ... "5-3 YOU WIN"
+
+The game score lives on its own subtopic so the record topic only ever
+carries a plain number. Messages are retained, so anyone who subscribes
+later immediately gets the latest values. The record is also saved to
+data/best_score.json so it survives restarting the game.
 
 Check it from another terminal (or another laptop):
     python check_score.py
@@ -38,15 +43,24 @@ def format_score(best):
     return f"{float(best):.1f}"
 
 
+def format_game(player_points, cpu_points, winner=None):
+    text = f"{player_points}-{cpu_points}"
+    if winner == "player":
+        text += " YOU WIN"
+    elif winner == "opponent":
+        text += " CPU WINS"
+    return text
+
+
 class ScorePublisher:
     """Publishes in a background thread so a slow or unreachable public
     broker never freezes the game."""
 
-    def __init__(self, enabled=True, broker=config.MQTT_BROKER, topic=config.SCORE_TOPIC):
-        self.topic = topic
+    def __init__(self, enabled=True, broker=config.MQTT_BROKER):
         self.status = "off" if not enabled else "connecting"
         self._client = None
-        self._pending = None
+        self._pending = {}            # topic -> latest message not yet sent
+        self._lock = threading.Lock()
         self._wake = threading.Event()
         if enabled:
             threading.Thread(target=self._run, args=(broker,), daemon=True).start()
@@ -65,14 +79,24 @@ class ScorePublisher:
         while True:
             self._wake.wait()
             self._wake.clear()
-            message, self._pending = self._pending, None
-            if message is not None:
-                self._client.publish(self.topic, message, qos=1, retain=True)
-                print(f"MQTT: {self.topic} <- {message}")
+            with self._lock:
+                pending, self._pending = self._pending, {}
+            for topic, message in pending.items():
+                self._client.publish(topic, message, qos=1, retain=True)
+                print(f"MQTT: {topic} <- {message}")
+
+    def _queue(self, topic, message):
+        with self._lock:
+            self._pending[topic] = message     # only the newest value per topic matters
+        self._wake.set()
 
     def publish(self, best):
-        self._pending = format_score(best)
-        self._wake.set()
+        """The record, as a float."""
+        self._queue(config.SCORE_TOPIC, format_score(best))
+
+    def publish_game(self, player_points, cpu_points, winner=None):
+        """The current game score."""
+        self._queue(config.GAME_TOPIC, format_game(player_points, cpu_points, winner))
 
     def close(self):
         if self._client is not None:

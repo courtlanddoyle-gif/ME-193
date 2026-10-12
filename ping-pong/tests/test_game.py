@@ -332,3 +332,26 @@ def test_smash_event_only_above_threshold():
     assert "smash" in events
     _, events = hit_once(config.SMASH_POWER - 0.01)
     assert "smash" not in events and "hit" in events
+
+
+def test_game_score_format():
+    from score import format_game
+    assert format_game(0, 0) == "0-0"
+    assert format_game(3, 2) == "3-2"
+    assert format_game(5, 3, "player") == "5-3 YOU WIN"
+    assert format_game(2, 5, "opponent") == "2-5 CPU WINS"
+
+
+def test_game_topic_is_separate_from_the_record_topic():
+    assert config.GAME_TOPIC.startswith(config.SCORE_TOPIC + "/")
+    assert config.SCORE_TOPIC == "ME193/Rogers/Courtland"
+
+
+def test_publisher_keeps_only_latest_value_per_topic():
+    from score import ScorePublisher
+    pub = ScorePublisher(enabled=False)
+    pub.publish(3)
+    pub.publish(4)
+    pub.publish_game(1, 0)
+    pub.publish_game(2, 0)
+    assert pub._pending == {config.SCORE_TOPIC: "4.0", config.GAME_TOPIC: "2-0"}

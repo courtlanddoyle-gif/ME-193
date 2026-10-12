@@ -14,7 +14,8 @@ DATA_DIR = HERE / "data"
 # --------------------------------------------------------------------------
 MQTT_BROKER = "test.mosquitto.org"
 MQTT_PORT = 1883
-SCORE_TOPIC = "ME193/Rogers/Courtland"
+SCORE_TOPIC = "ME193/Rogers/Courtland"          # the record, as a float (the assignment's format)
+GAME_TOPIC = SCORE_TOPIC + "/game"               # the current game to 5, e.g. "3-2"
 BEST_SCORE_FILE = DATA_DIR / "best_score.json"   # so the record survives restarts
 
 # --------------------------------------------------------------------------

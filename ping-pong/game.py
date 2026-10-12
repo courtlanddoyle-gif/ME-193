@@ -298,6 +298,7 @@ def main():
     game = Game(best=load_best())
     publisher = ScorePublisher(enabled=not args.no_mqtt, broker=args.broker)
     publisher.publish(game.best)
+    publisher.publish_game(game.player_points, game.opponent_points)
 
     mouse = {"x": 0.5}
     def on_mouse(event, x, y, flags, param):
@@ -365,6 +366,8 @@ def main():
             if "record" in events:
                 save_best(game.best)
                 publisher.publish(game.best)
+            if {"winner", "miss", "new_game", "armed"} & set(events):
+                publisher.publish_game(game.player_points, game.opponent_points, game.winner)
             if "game_won" in events:
                 celebration.start(now)
             if "new_game" in events:
