@@ -40,9 +40,27 @@ class LegoPaddle:
         from lelib import doubleMotor
 
         self._le = le
-        print("Connecting to the Double Motor...")
-        self.dm = doubleMotor()
-        self.dm.connect(card_serial=config.HUB_CARD_SERIAL, card_color=config.HUB_CARD_COLOR)
+        color = config.HUB_CARD_COLOR
+        card_color = getattr(le, f"LEGO_COLOR_{color.upper()}") if color else None
+        card = f"{color} card {config.HUB_CARD_SERIAL}" if color else "any card"
+        print(f"Connecting to the Double Motor ({card})...")
+        for attempt in range(1, 4):
+            self.dm = doubleMotor()
+            try:
+                self.dm.connect(card_serial=config.HUB_CARD_SERIAL, card_color=card_color)
+                break
+            except ConnectionError:
+                print(f"  attempt {attempt}/3: no Double Motor found for {card}")
+                if attempt < 3:
+                    time.sleep(2)
+        else:
+            raise SystemExit(
+                "\nCouldn't connect to the Double Motor. Check that:\n"
+                f"  - the hub was paired by scanning the {card} (see config.py)\n"
+                "  - the hub is on (press its button -- it sleeps after a few idle minutes)\n"
+                "  - no other script or LEGO app is still connected to it (close them)\n"
+                "  - Bluetooth is on (toggling it off/on in Windows Settings often helps)\n"
+                "Or play without it:  python game.py --sim")
         self.dm.device_notification_request(config.IMU_NOTIFY_MS)
         print("Connected.")
 

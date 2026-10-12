@@ -20,8 +20,10 @@ BEST_SCORE_FILE = DATA_DIR / "best_score.json"   # so the record survives restar
 # --------------------------------------------------------------------------
 # LEGO Double Motor (the paddle)
 # --------------------------------------------------------------------------
-HUB_CARD_SERIAL = None   # None = connect to the first Double Motor found
-HUB_CARD_COLOR = None
+# Only connect to the Double Motor paired with this Connection Card.
+# Set both to None to connect to the first Double Motor found instead.
+HUB_CARD_SERIAL = "3664"
+HUB_CARD_COLOR = "red"   # name of a le.LEGO_COLOR_* constant
 IMU_NOTIFY_MS = 20       # ask the hub for IMU data every 20 ms...
 IMU_RATE_HZ = 22         # ...but hub_check.py measured ~22 Hz actually arriving
 
@@ -50,7 +52,8 @@ PADDLE_SMOOTHING = 0.5      # 0 = no smoothing, closer to 1 = smoother but laggi
 # Otherwise fall back to the pretrained COCO model and look for objects that
 # the hub (or a ping pong paddle) tends to be detected as.
 HUB_YOLO_WEIGHTS = MODELS_DIR / "hub_yolo.pt"
-COCO_YOLO_WEIGHTS = "yolov8n.pt"
+# use the local copy if it exists, otherwise ultralytics downloads it by name
+COCO_YOLO_WEIGHTS = str(MODELS_DIR / "yolov8n.pt") if (MODELS_DIR / "yolov8n.pt").exists() else "yolov8n.pt"
 COCO_PADDLE_CLASSES = {"tennis racket", "cell phone", "remote", "mouse"}
 YOLO_EVERY_N_FRAMES = 3     # YOLO is the slowest step; don't run it every frame
 YOLO_MIN_CONF = 0.35
