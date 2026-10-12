@@ -16,6 +16,7 @@ Methods both provide:
     swing()           -> SimPaddle only: fake a swing (bound to SPACE)
     haptic(event)     -> event is "hit", "miss", "record" or "serve"
     shake_offset(now) -> pixels to jiggle the screen by (SimPaddle only)
+    last_haptic       -> (event, start time) of the rumble that actually played
     close()
 """
 
@@ -66,6 +67,7 @@ class LegoPaddle:
 
         self._imu = ImuBuffer()
         self._running = True
+        self.last_haptic = (None, 0.0)
         self._haptics = queue.Queue(maxsize=1)
         threading.Thread(target=self._imu_loop, daemon=True).start()
         threading.Thread(target=self._haptic_loop, daemon=True).start()
@@ -112,6 +114,7 @@ class LegoPaddle:
                 event = self._haptics.get(timeout=0.2)
             except queue.Empty:
                 continue
+            self.last_haptic = (event, time.monotonic())
             try:
                 getattr(self, f"_rumble_{event}")()
             except Exception as exc:
@@ -128,7 +131,9 @@ class LegoPaddle:
             if off_s:
                 tank(0, 0, blocking=False)
                 time.sleep(off_s)
-        self.dm.movement_stop(blocking=False)
+        # wait for the hub to confirm this one: if a non-blocking stop got
+        # lost over Bluetooth, the motors would keep spinning
+        self.dm.movement_stop(blocking=True)
 
     def _rumble_hit(self):
         # a sharp "thock": two hard, short kicks
@@ -178,6 +183,7 @@ class SimPaddle:
         self._lock = threading.Lock()
         self._shake_until = 0.0
         self._shake_px = 0
+        self.last_haptic = (None, 0.0)
         self._running = True
         self._t0 = time.monotonic()
         threading.Thread(target=self._imu_loop, daemon=True).start()
@@ -209,6 +215,7 @@ class SimPaddle:
     def haptic(self, event):
         strength = {"hit": (0.12, 6), "miss": (0.5, 10), "record": (0.6, 14), "serve": (0.08, 3)}
         dur, px = strength[event]
+        self.last_haptic = (event, time.monotonic())
         self._shake_until = time.monotonic() + dur
         self._shake_px = px
         tones = {

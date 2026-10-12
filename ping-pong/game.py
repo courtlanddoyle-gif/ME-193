@@ -34,6 +34,15 @@ WINDOW = "Ping Pong (q to quit)"
 # table drawing area inside the table panel
 TX0, TY0, TX1, TY1 = 50, 30, TABLE_W - 50, CAM_H - 30
 
+# What each rumble means, shown on screen while the hub is buzzing
+HAPTIC_LABELS = {
+    "serve": "HUB: 1 kick = serve",
+    "hit": "HUB: 2 kicks = hit!",
+    "record": "HUB: 3 pulses = NEW RECORD!",
+    "miss": "HUB: long buzz = miss",
+}
+HAPTIC_LABEL_S = 1.2
+
 SLOW_LOOP_S = 0.15     # print a breakdown of any game-loop tick slower than this
 KEY_TAGS = {ord("0"): 0, ord("1"): 1, ord("2"): 2, ord("3"): 3}
 
@@ -163,7 +172,7 @@ def bar(img, x, y, label, value, threshold=None, width=150):
         cv2.line(img, (tx_, y - 2), (tx_, y + 16), (255, 255, 255), 1)
 
 
-def draw_hud(game, swing_prob, mic_level, locator_source, mqtt_status, total_w):
+def draw_hud(game, swing_prob, mic_level, locator_source, mqtt_status, total_w, haptic_label=None):
     img = np.full((HUD_H, total_w, 3), 15, np.uint8)
     big = f"STREAK {game.streak}    RECORD {game.best}    LEVEL {game.level.upper()}    [{game.state}]"
     cv2.putText(img, big, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
@@ -173,6 +182,8 @@ def draw_hud(game, swing_prob, mic_level, locator_source, mqtt_status, total_w):
         bar(img, 250, 66, "whistle", mic_level[2] / (2 * config.WHISTLE_TONALITY), 0.5)
     cv2.putText(img, f"paddle: {locator_source}   mqtt: {mqtt_status}", (500, 80),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (170, 170, 170), 1)
+    if haptic_label:
+        cv2.putText(img, haptic_label, (total_w - 330, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (80, 200, 255), 2)
     return img
 
 
@@ -213,6 +224,7 @@ def main():
 
     seen_seq = 0
     snap = None
+    record_rumbled = False   # the record rumble plays once per rally, not on every hit past it
     paddle_x = 0.5
     last = time.monotonic()
     try:
@@ -262,10 +274,14 @@ def main():
             # ---- actions -------------------------------------------------
             if "hit" in events:
                 detector.consume(now)
+            if "serve" in events or "miss" in events:
+                record_rumbled = False
             if "record" in events:
-                paddle.haptic("record")
                 save_best(game.best)
                 publisher.publish(game.best)
+            if "record" in events and not record_rumbled:
+                paddle.haptic("record")
+                record_rumbled = True
             elif "hit" in events:
                 paddle.haptic("hit")
             if "miss" in events:
@@ -278,6 +294,8 @@ def main():
 
             # ---- draw ----------------------------------------------------
             t_actions = time.monotonic()
+            h_event, h_time = paddle.last_haptic
+            haptic_label = HAPTIC_LABELS.get(h_event) if now - h_time < HAPTIC_LABEL_S else None
             table = draw_table(game, paddle_x, swinging)
             if snap is not None and snap["frame"] is not None:
                 note = f"{'SIM paddle' if paddle.is_sim else 'LEGO paddle'} | paddle from {locator.source}"
@@ -287,7 +305,8 @@ def main():
                 left = no_camera_panel()
             screen = np.vstack([np.hstack([left, table]),
                                 draw_hud(game, detector.prob, mic.level if mic else None,
-                                         locator.source, publisher.status, CAM_W + TABLE_W)])
+                                         locator.source, publisher.status, CAM_W + TABLE_W,
+                                         haptic_label)])
             dx, dy = paddle.shake_offset(now)
             if dx or dy:
                 screen = np.roll(screen, (dy, dx), axis=(0, 1))
