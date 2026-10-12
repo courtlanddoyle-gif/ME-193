@@ -10,6 +10,7 @@ Keyboard shortcuts (always work, handy for testing):
     0           acts like the start tag
     w           acts like a whistle (serve)
     SPACE       swing (sim paddle only)
+    n           new game (restart at 0-0, same level)
     r           reset the record to 0
     q / ESC     quit
 """
@@ -21,7 +22,7 @@ import cv2
 import numpy as np
 
 import config
-from game_logic import OPPONENT_WIDTH, READY, RALLY, SETUP, Game
+from game_logic import GAME_OVER, OPPONENT_WIDTH, RALLY, Game
 from imu_swing import SwingDetector
 from paddle_hw import make_paddle
 from score import ScorePublisher, load_best, save_best
@@ -40,7 +41,13 @@ HAPTIC_LABELS = {
     "hit": "HUB: 2 kicks = hit!",
     "record": "HUB: 3 pulses = NEW RECORD!",
     "miss": "HUB: long buzz = miss",
+    "win": "HUB: victory dance!",
+    "lose": "HUB: sad buzz = game over",
 }
+# If several things happen in one tick (e.g. a winning point is also a
+# game win), only the most important rumble plays.
+HAPTIC_PRIORITY = ["game_won", "game_lost", "record", "miss", "hit", "serve"]
+HAPTIC_FOR_EVENT = {"game_won": "win", "game_lost": "lose"}
 HAPTIC_LABEL_S = 1.2
 
 SLOW_LOOP_S = 0.15     # print a breakdown of any game-loop tick slower than this
@@ -90,6 +97,71 @@ def draw_hub_paddle(img, cx, cy, width_px, color, thick=2):
     cv2.circle(img, (cx, cy), 3, color, -1)          # the button light
 
 
+class Celebration:
+    """Confetti bursts over the whole window when you win a game."""
+
+    COLORS = [(60, 60, 255), (60, 220, 255), (80, 255, 120), (255, 160, 60),
+              (255, 80, 200), (255, 255, 255)]
+
+    def __init__(self):
+        self.particles = []
+        self._bursts = []
+        self._last = 0.0
+
+    def start(self, now):
+        self._bursts = [now, now + 1.2, now + 2.4]   # three waves of confetti
+        self._last = now
+
+    def _burst(self, width):
+        rng = np.random.default_rng()
+        for _ in range(140):
+            self.particles.append([
+                rng.uniform(0, width), rng.uniform(-60, 0),      # x, y
+                rng.uniform(-60, 60), rng.uniform(80, 260),      # vx, vy (px/s)
+                self.COLORS[rng.integers(len(self.COLORS))],
+                int(rng.integers(3, 7)),                        # size
+            ])
+
+    def draw(self, screen, now):
+        dt = min(now - self._last, 0.05)
+        self._last = now
+        h, w = screen.shape[:2]
+        while self._bursts and now >= self._bursts[0]:
+            self._bursts.pop(0)
+            self._burst(w)
+        for p in self.particles:
+            p[0] += p[2] * dt
+            p[1] += p[3] * dt
+            p[3] += 120 * dt                                     # gravity
+            cv2.rectangle(screen, (int(p[0]), int(p[1])),
+                          (int(p[0]) + p[5], int(p[1]) + p[5]), p[4], -1)
+        self.particles = [p for p in self.particles if p[1] < h]
+
+    @property
+    def active(self):
+        return bool(self.particles or self._bursts)
+
+
+def draw_banner(screen, now, game):
+    """Big end-of-game banner across the middle of the window."""
+    h, w = screen.shape[:2]
+    won = game.winner == "player"
+    title = "YOU WIN!" if won else "CPU WINS"
+    score = f"{game.player_points} - {game.opponent_points}"
+    pulse = 1.0 + (0.08 * np.sin(now * 6) if won else 0)
+    overlay = screen.copy()
+    cv2.rectangle(overlay, (0, h // 2 - 90), (w, h // 2 + 80), (20, 20, 20), -1)
+    cv2.addWeighted(overlay, 0.7, screen, 0.3, 0, dst=screen)
+    color = (80, 255, 120) if won else (160, 160, 160)
+    for text, scale, y in ((title, 2.6 * pulse, h // 2 - 10), (score, 1.3, h // 2 + 40)):
+        (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, scale, 4)
+        cv2.putText(screen, text, ((w - tw) // 2, y), cv2.FONT_HERSHEY_DUPLEX, scale, color, 4)
+    hint = "Show tag 0 or press n for a new game"
+    (tw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+    cv2.putText(screen, hint, ((w - tw) // 2, h // 2 + 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                (220, 220, 220), 1)
+
+
 def draw_table(game, paddle_x, swinging):
     img = np.full((CAM_H, TABLE_W, 3), (40, 28, 18), np.uint8)
     cv2.rectangle(img, (TX0, TY0), (TX1, TY1), (110, 70, 20), -1)
@@ -111,6 +183,14 @@ def draw_table(game, paddle_x, swinging):
         cv2.circle(img, (tx(b.x), ty(b.y) - int(10 * b.height)), r, (240, 245, 255), -1)
         if b.toward_player:   # show where it's headed so you can get there
             cv2.drawMarker(img, (tx(b.landing_x), TY1), (0, 220, 255), cv2.MARKER_TRIANGLE_UP, 14, 2)
+
+    # scoreboard
+    board = f"YOU {game.player_points}   CPU {game.opponent_points}"
+    (bw, _), _ = cv2.getTextSize(board, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+    cv2.rectangle(img, (TX0 + 6, ty(0.5) + 10), (TX0 + 22 + bw, ty(0.5) + 40), (20, 20, 20), -1)
+    cv2.putText(img, board, (TX0 + 14, ty(0.5) + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    cv2.putText(img, f"first to {config.POINTS_TO_WIN}", (TX0 + 14, ty(0.5) + 56),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1)
 
     pw = int(game.params["paddle_width"] * (TX1 - TX0))
     color = (80, 255, 120) if swinging else (230, 230, 230)
@@ -174,7 +254,8 @@ def bar(img, x, y, label, value, threshold=None, width=150):
 
 def draw_hud(game, swing_prob, mic_level, locator_source, mqtt_status, total_w, haptic_label=None):
     img = np.full((HUD_H, total_w, 3), 15, np.uint8)
-    big = f"STREAK {game.streak}    RECORD {game.best}    LEVEL {game.level.upper()}    [{game.state}]"
+    big = (f"{game.score_text}    STREAK {game.streak}    RECORD {game.best}    "
+           f"LEVEL {game.level.upper()}    [{game.state}]")
     cv2.putText(img, big, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
     cv2.putText(img, game.message, (12, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 255), 1)
     bar(img, 12, 66, "swing P", swing_prob, config.SWING_THRESHOLD)
@@ -225,6 +306,7 @@ def main():
     seen_seq = 0
     snap = None
     record_rumbled = False   # the record rumble plays once per rally, not on every hit past it
+    celebration = Celebration()
     paddle_x = 0.5
     last = time.monotonic()
     try:
@@ -238,7 +320,7 @@ def main():
             # The camera + models run on their own thread (VisionWorker);
             # here we only pick up whatever they finished most recently.
             if vision is not None:
-                vision.want_tags = game.state in (SETUP, READY)
+                vision.want_tags = game.state != RALLY   # tags work between rallies and after a game
                 snap = vision.latest()
                 if snap["seq"] != seen_seq:          # a new camera frame is ready
                     seen_seq = snap["seq"]
@@ -260,6 +342,7 @@ def main():
                 tag = KEY_TAGS[key]
             if key == ord("w"):
                 whistle = True
+            restart = key == ord("n")
             if key == ord(" "):
                 paddle.swing()
             if key == ord("r"):
@@ -269,7 +352,7 @@ def main():
 
             # ---- policy --------------------------------------------------
             t_input = time.monotonic()
-            events = game.update(now, dt, paddle_x, swinging, tag, whistle)
+            events = game.update(now, dt, paddle_x, swinging, tag, whistle, restart)
 
             # ---- actions -------------------------------------------------
             if "hit" in events:
@@ -279,15 +362,16 @@ def main():
             if "record" in events:
                 save_best(game.best)
                 publisher.publish(game.best)
-            if "record" in events and not record_rumbled:
-                paddle.haptic("record")
-                record_rumbled = True
-            elif "hit" in events:
-                paddle.haptic("hit")
-            if "miss" in events:
-                paddle.haptic("miss")
-            if "serve" in events:
-                paddle.haptic("serve")
+            if "game_won" in events:
+                celebration.start(now)
+            if "new_game" in events:
+                celebration = Celebration()
+            rumble_events = [e for e in events if not (e == "record" and record_rumbled)]
+            for e in HAPTIC_PRIORITY:
+                if e in rumble_events:
+                    paddle.haptic(HAPTIC_FOR_EVENT.get(e, e))
+                    record_rumbled = record_rumbled or e == "record"
+                    break
             for e in events:
                 if e != "hit":
                     print(f"[{game.state}] {e}: {game.message}")
@@ -307,6 +391,10 @@ def main():
                                 draw_hud(game, detector.prob, mic.level if mic else None,
                                          locator.source, publisher.status, CAM_W + TABLE_W,
                                          haptic_label)])
+            if game.state == GAME_OVER:
+                draw_banner(screen, now, game)
+            if celebration.active:
+                celebration.draw(screen, now)
             dx, dy = paddle.shake_offset(now)
             if dx or dy:
                 screen = np.roll(screen, (dy, dx), axis=(0, 1))

@@ -14,7 +14,7 @@ Methods both provide:
     imu_window(now)   -> (N, 6) array of recent IMU readings
     imu_since(t)      -> [(timestamp, reading), ...] newer than t (for recording)
     swing()           -> SimPaddle only: fake a swing (bound to SPACE)
-    haptic(event)     -> event is "hit", "miss", "record" or "serve"
+    haptic(event)     -> event is "hit", "miss", "record", "serve", "win" or "lose"
     shake_offset(now) -> pixels to jiggle the screen by (SimPaddle only)
     last_haptic       -> (event, start time) of the rumble that actually played
     close()
@@ -30,7 +30,7 @@ import numpy as np
 import config
 from imu_swing import ImuBuffer, random_gravity, random_swing, synthetic_sample
 
-HAPTIC_EVENTS = ("hit", "miss", "record", "serve")
+HAPTIC_EVENTS = ("hit", "miss", "record", "serve", "win", "lose")
 
 
 class LegoPaddle:
@@ -157,6 +157,31 @@ class LegoPaddle:
         self.dm.light_color(self._le.LEGO_COLOR_BLUE, blocking=False)
         self._buzz(50, pulses=1, on_s=0.05)
 
+    def _rumble_win(self):
+        # victory: a rising fanfare while the light cycles through colors
+        # and the motors "dance" left-right in time with it
+        le = self._le
+        colors = [le.LEGO_COLOR_RED, le.LEGO_COLOR_YELLOW, le.LEGO_COLOR_GREEN,
+                  le.LEGO_COLOR_AZURE, le.LEGO_COLOR_PURPLE, le.LEGO_COLOR_MAGENTA]
+        fanfare = [523, 659, 784, 1047, 784, 1047]          # C E G C' G C'
+        for i, (freq, color) in enumerate(zip(fanfare, colors)):
+            self.dm.light_color(color, blocking=False)
+            self.dm.beep(frequency=freq, blocking=False)
+            s = 70 if i % 2 == 0 else -70
+            self.dm.movement_move_tank(s, -s, blocking=False)
+            time.sleep(0.18)
+        self.dm.movement_stop(blocking=True)
+        self.dm.light_color(le.LEGO_COLOR_GREEN, pattern=le.LIGHT_PATTERN_BREATHE, blocking=False)
+
+    def _rumble_lose(self):
+        # three falling beeps, then a slow fading buzz
+        le = self._le
+        self.dm.light_color(le.LEGO_COLOR_RED, pattern=le.LIGHT_PATTERN_LONG_BLINK, blocking=False)
+        for freq in (392, 330, 262):
+            self.dm.beep(frequency=freq, blocking=False)
+            time.sleep(0.3)
+        self._buzz(40, pulses=8, on_s=0.08)
+
     def close(self):
         self._running = False
         try:
@@ -213,7 +238,8 @@ class SimPaddle:
             self._swings.append(random_swing(t, self._rng))
 
     def haptic(self, event):
-        strength = {"hit": (0.12, 6), "miss": (0.5, 10), "record": (0.6, 14), "serve": (0.08, 3)}
+        strength = {"hit": (0.12, 6), "miss": (0.5, 10), "record": (0.6, 14), "serve": (0.08, 3),
+                    "win": (1.2, 18), "lose": (0.9, 8)}
         dur, px = strength[event]
         self.last_haptic = (event, time.monotonic())
         self._shake_until = time.monotonic() + dur
@@ -223,6 +249,8 @@ class SimPaddle:
             "miss": [(220, 350)],
             "record": [(880, 90), (1100, 90), (1320, 160)],
             "serve": [(660, 50)],
+            "win": [(523, 150), (659, 150), (784, 150), (1047, 300), (784, 150), (1047, 450)],
+            "lose": [(392, 300), (330, 300), (262, 600)],
         }[event]
         threading.Thread(target=_play_tones, args=(tones,), daemon=True).start()
 

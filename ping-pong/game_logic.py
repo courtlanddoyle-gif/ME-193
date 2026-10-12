@@ -6,10 +6,16 @@ Table coordinates: x runs 0 (left) -> 1 (right); y runs 0 (opponent's end)
 -> 1 (your end).
 
 States:
-    SETUP  -- show a level tag (1/2/3), then the start tag (0)
-    READY  -- armed; whistle to serve (level tags still work here)
-    RALLY  -- ball in play
-    MISS   -- short pause after you miss, then back to READY
+    SETUP      -- show a level tag (1/2/3), then the start tag (0)
+    READY      -- armed; whistle to serve (level tags still work here)
+    RALLY      -- ball in play
+    POINT      -- short pause after a point, then back to READY
+    GAME_OVER  -- someone reached POINTS_TO_WIN; tag 0 (or 'n') for a new game
+
+Scoring, like real ping pong but to 5: you win the point if the opponent
+can't reach your return; the opponent wins it if you miss. Separately, the
+streak counts your continuous hits and the record is the longest streak
+ever -- that's what gets posted over MQTT.
 
 The policy -- how the game decides what happens each tick -- is the
 update() method. It's a rule-based state machine fed by the learned
@@ -24,7 +30,7 @@ import numpy as np
 
 import config
 
-SETUP, READY, RALLY, MISS = "SETUP", "READY", "RALLY", "MISS"
+SETUP, READY, RALLY, POINT, GAME_OVER = "SETUP", "READY", "RALLY", "POINT", "GAME_OVER"
 OPPONENT_WIDTH = 0.22
 SPEEDUP_PER_HIT = 0.03      # each hit in a rally makes the ball 3% faster...
 MAX_SPEEDUP = 1.5           # ...up to 1.5x the level's base speed
@@ -33,17 +39,19 @@ MAX_SPEEDUP = 1.5           # ...up to 1.5x the level's base speed
 class PDPaddle:
     """The opponent's paddle, driven by a PD controller toward where it
     predicts the ball will land:  accel = Kp * error - Kd * velocity.
-    Higher Kp = reacts harder; higher Kd = less overshoot/wobble."""
+    Higher Kp = reacts harder; higher Kd = less overshoot/wobble.
+    Its speed is capped at vmax, like a real player's (or motor's) top
+    speed -- without the cap it could teleport and would never miss."""
 
     def __init__(self, x=0.5):
         self.x = x
         self.v = 0.0
         self.target = x
 
-    def update(self, dt, kp, kd):
+    def update(self, dt, kp, kd, vmax=float("inf")):
         error = self.target - self.x
         accel = kp * error - kd * self.v
-        self.v += accel * dt
+        self.v = float(np.clip(self.v + accel * dt, -vmax, vmax))
         self.x += self.v * dt
         if not 0.0 <= self.x <= 1.0:          # walls
             self.x = float(np.clip(self.x, 0.0, 1.0))
@@ -99,7 +107,11 @@ class Game:
     ball: Ball = field(default_factory=Ball)
     opponent: PDPaddle = field(default_factory=PDPaddle)
     rally_hits: int = 0
+    player_points: int = 0
+    opponent_points: int = 0
+    winner: str = None            # "player" or "opponent" once the game is over
     _pause_until: float = 0.0
+    _react_at: float = 0.0        # opponent starts chasing your return at this time
     rng: random.Random = field(default_factory=random.Random)
 
     @property
@@ -113,38 +125,59 @@ class Game:
 
     # -- the policy ---------------------------------------------------------
 
-    def update(self, now, dt, paddle_x, swinging, tag=None, whistle=False):
+    @property
+    def score_text(self):
+        return f"YOU {self.player_points} - {self.opponent_points} CPU"
+
+    def update(self, now, dt, paddle_x, swinging, tag=None, whistle=False, restart=False):
         """Advance the game one tick. Returns a list of event names that
-        happened ("level", "armed", "serve", "hit", "miss", "record",
-        "winner") so the caller can trigger haptics, MQTT, sounds."""
+        happened ("level", "armed", "new_game", "serve", "hit", "record",
+        "miss", "winner", "game_won", "game_lost") so the caller can trigger
+        haptics, MQTT, sounds."""
         events = []
 
+        if restart or (tag == config.START_TAG_ID and self.state == GAME_OVER):
+            self.new_game()
+            return ["new_game"]
+
         # Tags only matter between rallies.
-        if tag is not None and self.state in (SETUP, READY):
+        if tag is not None and self.state in (SETUP, READY, GAME_OVER):
             if tag in config.LEVEL_TAG_IDS:
                 self.level = config.LEVEL_TAG_IDS[tag]
-                self.message = f"Level: {self.level.upper()}  --  show tag 0 to start"
-                if self.state == READY:
-                    self.message = f"Level: {self.level.upper()}  --  whistle to serve!"
+                next_step = "whistle to serve!" if self.state == READY else "show tag 0 to start"
+                self.message = f"Level: {self.level.upper()}  --  {next_step}"
                 events.append("level")
             elif tag == config.START_TAG_ID and self.state == SETUP:
                 self.state = READY
-                self.message = "Ready -- whistle to serve!"
+                self.message = f"First to {config.POINTS_TO_WIN}! Whistle to serve."
                 events.append("armed")
 
         if self.state == READY and whistle:
             self._serve()
             events.append("serve")
 
-        if self.state == MISS and now >= self._pause_until:
+        if self.state == POINT and now >= self._pause_until:
             self.state = READY
-            self.message = "Whistle to serve!"
+            self.message = f"{self.score_text}  --  whistle to serve!"
 
         if self.state == RALLY:
             events += self._rally_tick(now, dt, paddle_x, swinging)
 
-        self.opponent.update(dt, self.params["kp"], self.params["kd"])
+        p = self.params
+        self.opponent.update(dt, p["kp"], p["kd"], p["opp_vmax"])
         return events
+
+    def new_game(self):
+        """0-0, same level, ready to serve. The record survives; the streak
+        starts fresh."""
+        self.player_points = self.opponent_points = 0
+        self.winner = None
+        self.streak = 0
+        self.rally_hits = 0
+        self.state = READY
+        self.opponent.x = self.opponent.target = 0.5
+        self.opponent.v = 0.0
+        self.message = f"New game, first to {config.POINTS_TO_WIN}! Whistle to serve."
 
     def _rally_tick(self, now, dt, paddle_x, swinging):
         ball = self.ball
@@ -156,24 +189,27 @@ class Game:
             in_zone = config.CONTACT_ZONE[0] <= ball.y <= config.CONTACT_ZONE[1]
             lined_up = abs(ball.x - paddle_x) <= half
             if in_zone and lined_up and swinging:
-                return self._player_hit(paddle_x)
+                return self._player_hit(now, paddle_x)
             if ball.y > config.CONTACT_ZONE[1]:
                 return self._player_miss(now, lined_up)
         else:
-            self.opponent.target = ball.landing_x
+            # the opponent needs a moment to read your shot before chasing it
+            if now >= self._react_at:
+                self.opponent.target = ball.landing_x
             if ball.y <= 0.0:
                 if abs(self.opponent.x - ball.x) <= OPPONENT_WIDTH / 2:
                     self._opponent_return(paddle_x)
                 else:
-                    # PD controller didn't get there in time: your point,
-                    # streak survives, opponent serves again
+                    # PD controller couldn't get there in time: your point,
+                    # and your streak survives
+                    self.player_points += 1
                     self.message = "Winner! Opponent couldn't reach it."
-                    self._serve()
-                    return ["winner"]
+                    return ["winner"] + self._end_point(now)
         return []
 
-    def _player_hit(self, paddle_x):
+    def _player_hit(self, now, paddle_x):
         events = ["hit"]
+        self._react_at = now + self.params["opp_delay"]
         self.streak += 1
         self.rally_hits += 1
         if self.streak > self.best:
@@ -187,13 +223,26 @@ class Game:
         return events
 
     def _player_miss(self, now, lined_up):
-        self.state = MISS
-        self._pause_until = now + config.MISS_PAUSE_S
         self.message = ("Miss -- you were there but didn't swing!" if lined_up
                         else "Miss -- paddle wasn't in the right spot!")
         self.streak = 0
+        self.opponent_points += 1
+        return ["miss"] + self._end_point(now)
+
+    def _end_point(self, now):
+        """After any point: game over at POINTS_TO_WIN, otherwise a short pause."""
         self.rally_hits = 0
-        return ["miss"]
+        if max(self.player_points, self.opponent_points) >= config.POINTS_TO_WIN:
+            self.state = GAME_OVER
+            won = self.player_points > self.opponent_points
+            self.winner = "player" if won else "opponent"
+            self.message = (f"YOU WIN {self.player_points}-{self.opponent_points}!" if won
+                            else f"CPU wins {self.opponent_points}-{self.player_points}.")
+            self.message += "  Tag 0 or 'n' for a new game."
+            return ["game_won" if won else "game_lost"]
+        self.state = POINT
+        self._pause_until = now + config.POINT_PAUSE_S
+        return []
 
     def _opponent_return(self, paddle_x):
         to_x = self._opponent_aim(paddle_x)
@@ -214,5 +263,4 @@ class Game:
         self.opponent.v = 0.0
         to_x = self.rng.uniform(0.25, 0.75)    # serves are gentle
         self.ball.launch(0.5, 0.0, to_x, 1.0, self.ball_speed)
-        if not self.message.startswith("Winner"):
-            self.message = "Rally!"
+        self.message = f"Rally!  {self.score_text}"

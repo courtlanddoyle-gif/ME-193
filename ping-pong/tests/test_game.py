@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config  # noqa: E402
-from game_logic import MISS, READY, RALLY, SETUP, Game, PDPaddle  # noqa: E402
+from game_logic import GAME_OVER, POINT, READY, RALLY, SETUP, Game, PDPaddle  # noqa: E402
 from imu_swing import synthetic_window, window_features  # noqa: E402
 from score import format_score  # noqa: E402
 from vision import camera_x_to_table  # noqa: E402
@@ -30,15 +30,24 @@ def started_game(level="easy"):
     return g
 
 
-def play(g, seconds, player, t0=0.0):
-    """Run the game with a scripted player: player(game) -> (paddle_x, swinging)."""
+def play(g, seconds, player, t0=0.0, auto_serve=False):
+    """Run the game with a scripted player: player(game) -> (paddle_x, swinging).
+    auto_serve whistles whenever the game is waiting for a serve."""
     events = []
     t = t0
     for _ in range(int(seconds / DT)):
         t += DT
         x, swing = player(g)
-        events += g.update(t, DT, x, swing)
+        events += g.update(t, DT, x, swing, whistle=auto_serve and g.state == READY)
     return events, t
+
+
+@pytest.fixture
+def unbeatable_opponent(monkeypatch):
+    """Opponent with no speed limit or delay, so rallies never end on a winner."""
+    for level in config.LEVELS:
+        monkeypatch.setitem(config.LEVELS[level], "opp_vmax", 100.0)
+        monkeypatch.setitem(config.LEVELS[level], "opp_delay", 0.0)
 
 
 # ---- states and tags --------------------------------------------------------
@@ -76,7 +85,7 @@ def perfect_player(g):
     return g.ball.x, in_zone
 
 
-def test_perfect_player_builds_a_streak():
+def test_perfect_player_builds_a_streak(unbeatable_opponent):
     g = started_game("easy")
     g.update(0, DT, 0.5, False, whistle=True)
     events, _ = play(g, 20, perfect_player)
@@ -91,8 +100,9 @@ def test_no_swing_is_a_miss_even_when_lined_up():
     while g.state == RALLY and t < 5:
         t += DT
         g.update(t, DT, g.ball.x, False)
-    assert g.state == MISS
+    assert g.state == POINT
     assert "didn't swing" in g.message
+    assert (g.player_points, g.opponent_points) == (0, 1)
 
 
 def test_wrong_place_is_a_miss_even_when_swinging():
@@ -102,7 +112,7 @@ def test_wrong_place_is_a_miss_even_when_swinging():
     assert "miss" in events and g.streak == 0
 
 
-def test_miss_resets_streak_but_keeps_record_then_ready():
+def test_miss_resets_streak_but_keeps_record_then_ready(unbeatable_opponent):
     g = started_game()
     g.update(0, DT, 0.5, False, whistle=True)
     _, t = play(g, 12, perfect_player)
@@ -111,11 +121,11 @@ def test_miss_resets_streak_but_keeps_record_then_ready():
     events, t = play(g, 5, lambda g: ((g.ball.x + 0.5) % 1.0, False), t0=t)
     assert "miss" in events
     assert g.streak == 0 and g.best == best
-    play(g, config.MISS_PAUSE_S + 0.2, lambda g: (0.5, False), t0=t)
+    play(g, config.POINT_PAUSE_S + 0.2, lambda g: (0.5, False), t0=t)
     assert g.state == READY
 
 
-def test_record_event_only_when_beating_best():
+def test_record_event_only_when_beating_best(unbeatable_opponent):
     g = started_game()
     g.best = 100
     g.update(0, DT, 0.5, False, whistle=True)
@@ -129,7 +139,85 @@ def test_harder_levels_are_faster_with_smaller_paddles():
     assert e["paddle_width"] > m["paddle_width"] > h["paddle_width"]
 
 
+# ---- points and games -------------------------------------------------------
+
+def never_hits(g):
+    return (g.ball.x + 0.5) % 1.0, False
+
+
+def test_losing_five_points_loses_the_game():
+    g = started_game()
+    events, _ = play(g, 60, never_hits, auto_serve=True)
+    assert events.count("miss") == config.POINTS_TO_WIN
+    assert "game_lost" in events and "game_won" not in events
+    assert g.state == GAME_OVER and g.winner == "opponent"
+    assert (g.player_points, g.opponent_points) == (0, config.POINTS_TO_WIN)
+
+
+def angling_player(g):
+    """Hits every ball off the edge of the paddle, angling it away from center."""
+    edge = 0.8 * g.params["paddle_width"] / 2
+    in_zone = g.ball.toward_player and g.ball.y >= config.CONTACT_ZONE[0]
+    side = 1 if g.ball.x > 0.5 else -1
+    return g.ball.x - side * edge, in_zone
+
+
+def test_angled_shots_beat_the_opponent_and_win_the_game():
+    g = started_game("medium")
+    events, _ = play(g, 400, angling_player, auto_serve=True)
+    assert "game_won" in events
+    assert g.state == GAME_OVER and g.winner == "player"
+    assert g.player_points == config.POINTS_TO_WIN
+
+
+def test_winner_point_keeps_the_streak():
+    g = started_game("medium")
+    events, _ = play(g, 400, angling_player, auto_serve=True)
+    first_winner = events.index("winner")
+    assert "miss" not in events[:first_winner]
+    assert g.streak == events.count("hit")    # never missed, so every hit is in the streak
+
+
+def test_restart_key_starts_a_fresh_game_but_keeps_the_record():
+    g = started_game("hard")
+    play(g, 60, never_hits, auto_serve=True)
+    g.best = 7
+    assert g.state == GAME_OVER
+    assert g.update(100, DT, 0.5, False, restart=True) == ["new_game"]
+    assert g.state == READY and g.level == "hard"
+    assert (g.player_points, g.opponent_points, g.streak, g.best) == (0, 0, 0, 7)
+
+
+def test_start_tag_after_game_over_starts_new_game():
+    g = started_game()
+    play(g, 60, never_hits, auto_serve=True)
+    assert g.update(100, DT, 0.5, False, tag=config.START_TAG_ID) == ["new_game"]
+    assert g.state == READY
+
+
+def test_level_tag_works_after_game_over():
+    g = started_game("easy")
+    play(g, 60, never_hits, auto_serve=True)
+    g.update(100, DT, 0.5, False, tag=3)
+    assert g.level == "hard" and g.state == GAME_OVER
+
+
+def test_no_serving_after_game_over():
+    g = started_game()
+    play(g, 60, never_hits, auto_serve=True)
+    assert "serve" not in g.update(100, DT, 0.5, False, whistle=True)
+    assert g.state == GAME_OVER
+
+
 # ---- PD opponent ------------------------------------------------------------
+
+def test_opponent_speed_is_capped():
+    paddle = PDPaddle(0.0)
+    paddle.target = 1.0
+    for _ in range(30):
+        paddle.update(DT, kp=1000, kd=0, vmax=0.3)
+        assert abs(paddle.v) <= 0.3 + 1e-9
+
 
 @pytest.mark.parametrize("level", list(config.LEVELS))
 def test_pd_opponent_settles_on_target(level):

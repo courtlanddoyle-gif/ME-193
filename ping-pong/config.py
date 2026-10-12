@@ -76,16 +76,23 @@ WHISTLE_MIN_RMS = 0.01            # ignore near-silence
 WHISTLE_MIN_BLOCKS = 6            # ~0.3 s of steady whistle to serve
 
 # --------------------------------------------------------------------------
-# Levels: ball speed (table lengths per second), paddle size, and the
-# opponent's PD gains and how often it aims away from you.
+# Levels: ball speed (table lengths per second), your paddle size, and the
+# opponent: PD gains, top speed (table widths/s), reaction delay (s) after
+# you hit, and how often it aims away from you. The top speed and delay are
+# what make the opponent beatable -- angle a shot into the corner and it
+# can't get there in time.
 # --------------------------------------------------------------------------
 LEVELS = {
-    "easy":   dict(ball_speed=0.45, paddle_width=0.30, kp=18.0, kd=6.0, aim_away=0.2),
-    "medium": dict(ball_speed=0.70, paddle_width=0.22, kp=30.0, kd=8.0, aim_away=0.5),
-    "hard":   dict(ball_speed=1.00, paddle_width=0.16, kp=60.0, kd=12.0, aim_away=0.8),
+    "easy":   dict(ball_speed=0.45, paddle_width=0.30, kp=18.0, kd=6.0,
+                   opp_vmax=0.20, opp_delay=0.30, aim_away=0.2),
+    "medium": dict(ball_speed=0.70, paddle_width=0.22, kp=30.0, kd=8.0,
+                   opp_vmax=0.32, opp_delay=0.20, aim_away=0.5),
+    "hard":   dict(ball_speed=1.00, paddle_width=0.16, kp=60.0, kd=12.0,
+                   opp_vmax=0.50, opp_delay=0.12, aim_away=0.8),
 }
 DEFAULT_LEVEL = "easy"
 
 # The ball can only be hit while it's in the last stretch of your side.
 CONTACT_ZONE = (0.82, 1.0)        # fraction of table length (0 = opponent, 1 = you)
-MISS_PAUSE_S = 1.5
+POINT_PAUSE_S = 1.5             # pause after each point before you can serve
+POINTS_TO_WIN = 5
