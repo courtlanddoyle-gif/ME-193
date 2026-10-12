@@ -15,3 +15,7 @@ data/best_score.json
 hub_photos/
 # YOLO training logs (best weights are copied to models/hub_yolo.pt)
 runs/
+
+# Roboflow downloads (import_roboflow.py copies them into data/hub_yolo/)
+*.yolov8/
+*.yolov8.zip

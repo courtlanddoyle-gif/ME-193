@@ -1,0 +1,5 @@
+path: C:/Users/cjdoy/Box/AI in Robots/9-10 test folder/ME-193/ping-pong/data/hub_yolo
+train: images/train
+val: images/val
+names:
+  0: lego_hub

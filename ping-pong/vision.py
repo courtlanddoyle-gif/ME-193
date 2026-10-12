@@ -98,7 +98,7 @@ class HubDetector:
     def detect(self, frame_bgr):
         """All paddle-like boxes as [(x1, y1, x2, y2, conf, name)], normalized 0..1."""
         h, w = frame_bgr.shape[:2]
-        result = self.model.predict(frame_bgr, imgsz=320, conf=config.YOLO_MIN_CONF, verbose=False)[0]
+        result = self.model.predict(frame_bgr, imgsz=config.YOLO_IMGSZ, conf=config.YOLO_MIN_CONF, verbose=False)[0]
         boxes = []
         for box in result.boxes:
             name = result.names[int(box.cls)]
@@ -165,7 +165,7 @@ class PaddleLocator:
                     cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
                     return (cx - wrist[0]) ** 2 + (cy - wrist[1]) ** 2
                 best = min(boxes, key=dist)
-                if dist(best) < 0.25 ** 2:
+                if dist(best) < config.BOX_MAX_WRIST_DIST ** 2:   # a box far from your hand is a false alarm
                     self.box = best
             else:
                 self.box = max(boxes, key=lambda b: b[4])

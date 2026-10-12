@@ -64,6 +64,8 @@ COCO_YOLO_WEIGHTS = str(MODELS_DIR / "yolov8n.pt") if (MODELS_DIR / "yolov8n.pt"
 COCO_PADDLE_CLASSES = {"tennis racket", "cell phone", "remote", "mouse"}
 YOLO_EVERY_N_FRAMES = 3     # YOLO is the slowest step; don't run it every frame
 YOLO_MIN_CONF = 0.35
+YOLO_IMGSZ = 640            # the hub is small in frame (~5% of the width); 320 loses it
+BOX_MAX_WRIST_DIST = 0.15   # YOLO box only counts if its center is this close to your wrist (fraction of frame)
 
 # --------------------------------------------------------------------------
 # AprilTags (tag36h11 family; print them with make_tags.py)
