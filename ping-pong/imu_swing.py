@@ -146,6 +146,16 @@ def synthetic_dataset(n_per_class=600, seed=0):
     return np.array(X), np.array(y)
 
 
+def swing_power(window):
+    """Peak rotation speed in the window, scaled to 0 (gentle) .. 1 (full smash)."""
+    w = np.asarray(window, dtype=np.float64)
+    if w.ndim != 2 or len(w) == 0:
+        return 0.0
+    peak = float(np.linalg.norm(w[:, 3:6], axis=1).max())
+    lo, hi = config.SWING_POWER_RANGE
+    return float(np.clip((peak - lo) / (hi - lo), 0.0, 1.0))
+
+
 # --------------------------------------------------------------------------
 # Live detector
 # --------------------------------------------------------------------------
@@ -164,6 +174,7 @@ class SwingDetector:
             )
         self.model = joblib.load(model_path)
         self.prob = 0.0
+        self.power = 0.0              # strongest point of the current swing so far
         self._latched_until = 0.0
         self._cooldown_until = 0.0
 
@@ -174,7 +185,13 @@ class SwingDetector:
             return
         self.prob = float(self.model.predict_proba(feats.reshape(1, -1))[0, 1])
         if self.prob >= config.SWING_THRESHOLD and now >= self._cooldown_until:
+            if not self.swinging(now):
+                self.power = 0.0      # a new swing starts
             self._latched_until = now + config.SWING_LATCH_S
+        if self.swinging(now):
+            # the classifier often fires before the swing peaks, so keep
+            # raising the power estimate for as long as the swing is live
+            self.power = max(self.power, swing_power(window))
 
     def swinging(self, now):
         return now < self._latched_until

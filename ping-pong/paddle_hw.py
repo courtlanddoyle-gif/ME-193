@@ -14,7 +14,7 @@ Methods both provide:
     imu_window(now)   -> (N, 6) array of recent IMU readings
     imu_since(t)      -> [(timestamp, reading), ...] newer than t (for recording)
     swing()           -> SimPaddle only: fake a swing (bound to SPACE)
-    haptic(event)     -> event is "hit", "miss", "record", "serve", "win" or "lose"
+    haptic(event)     -> one of HAPTIC_EVENTS
     shake_offset(now) -> pixels to jiggle the screen by (SimPaddle only)
     last_haptic       -> (event, start time) of the rumble that actually played
     close()
@@ -30,7 +30,7 @@ import numpy as np
 import config
 from imu_swing import ImuBuffer, random_gravity, random_swing, synthetic_sample
 
-HAPTIC_EVENTS = ("hit", "miss", "record", "serve", "win", "lose")
+HAPTIC_EVENTS = ("hit", "smash", "miss", "record", "serve", "win", "lose")
 
 
 class LegoPaddle:
@@ -140,6 +140,12 @@ class LegoPaddle:
         self.dm.light_color(self._le.LEGO_COLOR_GREEN, blocking=False)
         self._buzz(100, pulses=2, on_s=0.04)
 
+    def _rumble_smash(self):
+        # harder and longer than a hit, with a high beep
+        self.dm.light_color(self._le.LEGO_COLOR_ORANGE, blocking=False)
+        self.dm.beep(frequency=1320, blocking=False)
+        self._buzz(100, pulses=4, on_s=0.05)
+
     def _rumble_miss(self):
         # a long, droning buzz
         self.dm.light_color(self._le.LEGO_COLOR_RED, blocking=False)
@@ -238,7 +244,7 @@ class SimPaddle:
             self._swings.append(random_swing(t, self._rng))
 
     def haptic(self, event):
-        strength = {"hit": (0.12, 6), "miss": (0.5, 10), "record": (0.6, 14), "serve": (0.08, 3),
+        strength = {"hit": (0.12, 6), "smash": (0.25, 12), "miss": (0.5, 10), "record": (0.6, 14), "serve": (0.08, 3),
                     "win": (1.2, 18), "lose": (0.9, 8)}
         dur, px = strength[event]
         self.last_haptic = (event, time.monotonic())
@@ -246,6 +252,7 @@ class SimPaddle:
         self._shake_px = px
         tones = {
             "hit": [(1200, 40)],
+            "smash": [(1320, 60), (1760, 90)],
             "miss": [(220, 350)],
             "record": [(880, 90), (1100, 90), (1320, 160)],
             "serve": [(660, 50)],

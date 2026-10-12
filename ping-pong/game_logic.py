@@ -107,6 +107,7 @@ class Game:
     ball: Ball = field(default_factory=Ball)
     opponent: PDPaddle = field(default_factory=PDPaddle)
     rally_hits: int = 0
+    last_power: float = 0.0       # power of your most recent hit, 0..1
     player_points: int = 0
     opponent_points: int = 0
     winner: str = None            # "player" or "opponent" once the game is over
@@ -129,11 +130,14 @@ class Game:
     def score_text(self):
         return f"YOU {self.player_points} - {self.opponent_points} CPU"
 
-    def update(self, now, dt, paddle_x, swinging, tag=None, whistle=False, restart=False):
+    def update(self, now, dt, paddle_x, swinging, tag=None, whistle=False, restart=False,
+               swing_power=0.5):
         """Advance the game one tick. Returns a list of event names that
-        happened ("level", "armed", "new_game", "serve", "hit", "record",
-        "miss", "winner", "game_won", "game_lost") so the caller can trigger
-        haptics, MQTT, sounds."""
+        happened ("level", "armed", "new_game", "serve", "hit", "smash",
+        "record", "miss", "winner", "game_won", "game_lost") so the caller
+        can trigger haptics, MQTT, sounds.
+
+        swing_power (0..1, from the IMU) sets how fast your return goes."""
         events = []
 
         if restart or (tag == config.START_TAG_ID and self.state == GAME_OVER):
@@ -161,7 +165,7 @@ class Game:
             self.message = f"{self.score_text}  --  whistle to serve!"
 
         if self.state == RALLY:
-            events += self._rally_tick(now, dt, paddle_x, swinging)
+            events += self._rally_tick(now, dt, paddle_x, swinging, swing_power)
 
         p = self.params
         self.opponent.update(dt, p["kp"], p["kd"], p["opp_vmax"])
@@ -179,7 +183,7 @@ class Game:
         self.opponent.v = 0.0
         self.message = f"New game, first to {config.POINTS_TO_WIN}! Whistle to serve."
 
-    def _rally_tick(self, now, dt, paddle_x, swinging):
+    def _rally_tick(self, now, dt, paddle_x, swinging, swing_power=0.5):
         ball = self.ball
         ball.step(dt)
         half = self.params["paddle_width"] / 2
@@ -189,7 +193,7 @@ class Game:
             in_zone = config.CONTACT_ZONE[0] <= ball.y <= config.CONTACT_ZONE[1]
             lined_up = abs(ball.x - paddle_x) <= half
             if in_zone and lined_up and swinging:
-                return self._player_hit(now, paddle_x)
+                return self._player_hit(now, paddle_x, swing_power)
             if ball.y > config.CONTACT_ZONE[1]:
                 return self._player_miss(now, lined_up)
         else:
@@ -207,19 +211,27 @@ class Game:
                     return ["winner"] + self._end_point(now)
         return []
 
-    def _player_hit(self, now, paddle_x):
+    def _player_hit(self, now, paddle_x, power=0.5):
         events = ["hit"]
+        self.last_power = power
         self._react_at = now + self.params["opp_delay"]
         self.streak += 1
         self.rally_hits += 1
         if self.streak > self.best:
             self.best = self.streak
             events.append("record")
-        self.message = f"Hit! Streak {self.streak}"
+        smash = power >= config.SMASH_POWER
+        if smash:
+            events.append("smash")
+        self.message = f"{'SMASH!' if smash else 'Hit!'} Streak {self.streak}  ({power:.0%} power)"
         # Like Pong: where the ball meets the paddle sets the return angle.
         offset = (self.ball.x - paddle_x) / (self.params["paddle_width"] / 2)
         to_x = float(np.clip(self.ball.x + 0.35 * offset, 0.05, 0.95))
-        self.ball.launch(self.ball.x, self.ball.y, to_x, 0.0, self.ball_speed)
+        # Swing power: a harder swing sends a faster return, which gives the
+        # opponent less time to get there.
+        slow, fast = config.RETURN_SPEED_RANGE
+        self.ball.launch(self.ball.x, self.ball.y, to_x, 0.0,
+                         self.ball_speed * (slow + (fast - slow) * power))
         return events
 
     def _player_miss(self, now, lined_up):

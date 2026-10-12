@@ -10,3 +10,8 @@ models/pose_landmarker_lite.task
 
 # Your personal record
 data/best_score.json
+
+# Raw photos (the resized, labeled copies in data/hub_yolo/ are committed)
+hub_photos/
+# YOLO training logs (best weights are copied to models/hub_yolo.pt)
+runs/

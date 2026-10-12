@@ -292,3 +292,43 @@ def test_camera_x_is_mirrored_and_clipped():
     assert camera_x_to_table(lo) == pytest.approx(1.0)
     assert camera_x_to_table(0.5) == pytest.approx(0.5)
     assert camera_x_to_table(0.0) == 1.0 and camera_x_to_table(1.0) == 0.0
+
+
+# ---- swing power ------------------------------------------------------------
+
+def test_swing_power_scales_with_peak_rotation():
+    from imu_swing import swing_power
+    lo, hi = config.SWING_POWER_RANGE
+    def window(peak_dps):
+        w = np.zeros((5, 6)); w[:, 2] = 1000; w[2, 3] = peak_dps
+        return w
+    assert swing_power(window(lo - 50)) == 0.0
+    assert swing_power(window((lo + hi) / 2)) == pytest.approx(0.5)
+    assert swing_power(window(hi + 200)) == 1.0
+    assert swing_power(np.empty((0, 6))) == 0.0
+
+
+def hit_once(power):
+    g = started_game("medium")
+    g.update(0, DT, 0.5, False, whistle=True)
+    t = 0.0
+    while True:
+        t += DT
+        in_zone = g.ball.toward_player and g.ball.y >= config.CONTACT_ZONE[0]
+        events = g.update(t, DT, g.ball.x, in_zone, swing_power=power)
+        if "hit" in events:
+            return g, events
+
+
+def test_harder_swing_sends_a_faster_return():
+    soft, _ = hit_once(0.0)
+    hard, _ = hit_once(1.0)
+    assert abs(hard.ball.vy) > abs(soft.ball.vy) * 1.5
+    assert hard.last_power == 1.0
+
+
+def test_smash_event_only_above_threshold():
+    _, events = hit_once(config.SMASH_POWER)
+    assert "smash" in events
+    _, events = hit_once(config.SMASH_POWER - 0.01)
+    assert "smash" not in events and "hit" in events

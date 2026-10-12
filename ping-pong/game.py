@@ -39,6 +39,7 @@ TX0, TY0, TX1, TY1 = 50, 30, TABLE_W - 50, CAM_H - 30
 HAPTIC_LABELS = {
     "serve": "HUB: 1 kick = serve",
     "hit": "HUB: 2 kicks = hit!",
+    "smash": "HUB: 4 hard kicks = SMASH!",
     "record": "HUB: 3 pulses = NEW RECORD!",
     "miss": "HUB: long buzz = miss",
     "win": "HUB: victory dance!",
@@ -46,7 +47,7 @@ HAPTIC_LABELS = {
 }
 # If several things happen in one tick (e.g. a winning point is also a
 # game win), only the most important rumble plays.
-HAPTIC_PRIORITY = ["game_won", "game_lost", "record", "miss", "hit", "serve"]
+HAPTIC_PRIORITY = ["game_won", "game_lost", "record", "smash", "miss", "hit", "serve"]
 HAPTIC_FOR_EVENT = {"game_won": "win", "game_lost": "lose"}
 HAPTIC_LABEL_S = 1.2
 
@@ -259,9 +260,10 @@ def draw_hud(game, swing_prob, mic_level, locator_source, mqtt_status, total_w, 
     cv2.putText(img, big, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
     cv2.putText(img, game.message, (12, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 255), 1)
     bar(img, 12, 66, "swing P", swing_prob, config.SWING_THRESHOLD)
+    bar(img, 250, 66, "power", game.last_power, config.SMASH_POWER, width=110)
     if mic_level is not None:
-        bar(img, 250, 66, "whistle", mic_level[2] / (2 * config.WHISTLE_TONALITY), 0.5)
-    cv2.putText(img, f"paddle: {locator_source}   mqtt: {mqtt_status}", (500, 80),
+        bar(img, 440, 66, "whistle", mic_level[2] / (2 * config.WHISTLE_TONALITY), 0.5, width=110)
+    cv2.putText(img, f"paddle: {locator_source}   mqtt: {mqtt_status}", (640, 80),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (170, 170, 170), 1)
     if haptic_label:
         cv2.putText(img, haptic_label, (total_w - 330, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (80, 200, 255), 2)
@@ -352,7 +354,8 @@ def main():
 
             # ---- policy --------------------------------------------------
             t_input = time.monotonic()
-            events = game.update(now, dt, paddle_x, swinging, tag, whistle, restart)
+            events = game.update(now, dt, paddle_x, swinging, tag, whistle, restart,
+                                 swing_power=detector.power)
 
             # ---- actions -------------------------------------------------
             if "hit" in events:

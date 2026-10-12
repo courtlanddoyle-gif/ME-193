@@ -36,6 +36,13 @@ SWING_THRESHOLD = 0.60      # classifier probability needed to call it a swing
 SWING_LATCH_S = 0.25        # a swing still "counts" this long after it's detected
 SWING_COOLDOWN_S = 0.45     # one physical swing can only hit one ball
 
+# Swing power: how fast the hub was rotating at its peak (deg/s), mapped to
+# 0..1. From your recorded swings: median ~310, hardest ~540, and just
+# holding the hub stays under ~170.
+SWING_POWER_RANGE = (200.0, 480.0)   # deg/s that count as 0% and 100% power
+SMASH_POWER = 0.75                   # ~your hardest fifth of swings
+RETURN_SPEED_RANGE = (0.8, 1.4)      # return ball speed multiplier, soft..smash
+
 # --------------------------------------------------------------------------
 # Camera + vision
 # --------------------------------------------------------------------------
